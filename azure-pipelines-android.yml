@@ -1,0 +1,149 @@
+trigger:
+  branches:
+    include:
+      - azure-pipeline
+
+pr: none
+
+variables:
+  - group: MobileApp
+
+pool:
+  vmImage: 'macos-latest'
+
+steps:
+  - checkout: self
+    persistCredentials: true
+    clean: true
+
+  - task: NodeTool@0
+    displayName: 'Install Node'
+    inputs:
+      versionSpec: '20.16.0'
+  - script: |
+      corepack enable
+      
+      yarn set version 3.8.2
+      
+      yarn --version
+      
+      yarn cache clean
+      
+      rm -rf node_modules
+      yarn install
+
+    env:
+      YARN_ENABLE_IMMUTABLE_INSTALLS: false
+    displayName: 'Update Global Yarn, Install Dependencies, and Apply Patches'
+
+  - script: |
+      # Disable autocommit on version bump
+      yarn config set version-sign-git-tag false
+      yarn config set version-git-tag false
+      yarn config set version-commit-hooks false
+      # Checkout the branch where the build is triggered
+      git checkout $(Build.SourceBranchName)
+      # Get the existing version from package.json
+      oldVer=$(jq -r ".version" package.json)
+      # Bump version
+      yarn version --patch
+      # Add bumped version to staging
+      git add *
+      # Get the new version from package.json
+      newVer=$(jq -r ".version" package.json)
+      # Set environment variables for old and new versions
+      echo "##vso[task.setvariable variable=OLD_VERSION]$oldVer"
+      echo "##vso[task.setvariable variable=NEW_VERSION]$newVer"
+    displayName: 'Bump version and set variables'
+
+  - script: |
+      # Install Azul Zulu JDK 17
+      brew install --cask zulu@17
+    displayName: 'Install Azul Zulu JDK 17'
+
+    # Set JAVA_HOME and update PATH
+  - script: |
+      export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+      export PATH=$JAVA_HOME/bin:$PATH
+      echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+      echo "##vso[task.setvariable variable=PATH]$PATH"
+      java -version
+    displayName: 'Set JAVA_HOME and Update PATH'
+
+  - script: |
+      cd android
+      ./gradlew --version
+    displayName: 'Check Gradle Version'
+
+  - task: Gradle@1
+    displayName: 'Clean Project'
+    inputs:
+      gradleWrapperFile: 'android/gradlew'
+      workingDirectory: 'android/'
+      options: ''
+      tasks: 'clean'
+
+  - script: |
+      echo "Version Code: $(Build.BuildId)"
+      echo "Version Name: $(NEW_VERSION)"
+    displayName: 'Debug Version Properties'
+
+  - script: |
+      # Increment versionCode in build.gradle
+      sed -i '' 's/versionCode [0-9]*/versionCode $(Build.BuildId)/' android/app/build.gradle
+      # Output the updated build.gradle for debugging purposes
+      cat android/app/build.gradle | grep versionCode
+    displayName: 'Update versionCode in build.gradle'
+
+
+  - task: Gradle@1
+    displayName: 'Build APK'
+    inputs:
+      gradleWrapperFile: 'android/gradlew'
+      workingDirectory: 'android/'
+      options: '-PversionName=$(NEW_VERSION) -PversionCode=$(Build.BuildId)'
+      tasks: 'assembleStagingRelease'
+      publishJUnitResults: false
+      gradleOptions: '-Xmx3072m'
+      sqAnalysisBreakBuildIfQualityGateFailed: false
+
+  - task: AndroidSigning@3
+    displayName: 'Sign APK'
+    inputs:
+      apkFiles: 'android/app/build/outputs/apk/staging/release/*.apk'
+      apksignerKeystoreFile: 'release.keystore'
+      apksignerKeystorePassword: '$(AndroidKeyStorePassword)'
+      apksignerKeystoreAlias: '$(AndroidKeyAlias)'
+      apksignerKeyPassword: '$(AndroidKeyAliasPassword)'
+      zipalign: true
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish APK to Artifacts'
+    inputs:
+      PathtoPublish: 'android/app/build/outputs/apk/staging/release/*.apk'
+      ArtifactName: 'android'
+      publishLocation: 'Container'
+
+  - script: |
+      # Install Firebase CLI
+      npm install -g firebase-tools
+      firebase --version
+    displayName: 'Install Firebase CLI'
+
+  - task: CmdLine@2
+    displayName: 'Deploy APK to Firebase'
+    inputs:
+      script: |
+        # Get the app version from build.gradle
+        app_version=$(grep versionName $BUILD_SOURCESDIRECTORY/android/app/build.gradle | awk -F '"' '{print $2}')
+        
+        # Concatenate app version and build ID to create the Firebase version format
+        firebase_version="${app_version} ($(Build.BuildId))"
+        
+        # Deploy the APK to Firebase App Distribution
+        firebase appdistribution:distribute android/app/build/outputs/apk/staging/release/*.apk \
+        --app "$(AndroidStagingAppId)" \
+        --token "$(FirebaseToken)" \
+        --groups "Testers" \
+        --release-notes "Automated build for version ${firebase_version}"
+
