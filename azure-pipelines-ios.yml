@@ -163,3 +163,40 @@ steps:
       shouldSkipWaitingForProcessing: true
       shouldSkipSubmission: true
 
+
+- task: Bash@3
+        displayName: 'Install Fastlane'
+        inputs:
+          targetType: 'inline'
+          script: |
+            sudo gem install fastlane -NV
+
+      - task: Bash@3
+        displayName: 'Add Build to Staging Testers External Group'
+        inputs:
+          targetType: 'inline'
+          script: |
+            export PATH="/usr/local/bin:$PATH"
+            export APP_STORE_KEY_ID="$(ApiKeyId)"
+            export APP_STORE_ISSUER_ID="$(ApiKeyIssuerId)"
+            export APP_STORE_PRIVATE_KEY_PATH="$(Agent.TempDirectory)/AuthKey.p8"
+            export BUILD_ID="$(Build.BuildId)"
+            export APP_IDENTIFIER="com.app"
+            export RELEASE_NOTES="$(RELEASE_NOTES)"
+            export TESTFLIGHT_GROUP_NAME="$(groupname)"
+            cp "$(Agent.TempDirectory)/ApplePrivateAuthKey.p8" "$APP_STORE_PRIVATE_KEY_PATH"
+
+            cd ios
+            export FASTLANE_DISABLE_BUNDLER=1
+            fastlane release_to_testflight
+
+      # - task: Bash@3
+      #   displayName: 'Notify Microsoft Teams (Post-Build)'
+      #   inputs:
+      #     targetType: 'filePath'
+      #     filePath: 'path'
+      #   env:
+      #     PLATFORM: 'iOS'
+      #     ENV: 'Staging'
+      #     TEAMS_WEBOOK_URL: $(TeamsBuildChannelWebhookURL)
+
